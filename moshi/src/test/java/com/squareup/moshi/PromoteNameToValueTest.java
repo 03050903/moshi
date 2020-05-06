@@ -15,15 +15,28 @@
  */
 package com.squareup.moshi;
 
+import java.util.List;
 import okio.Buffer;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
 
+@RunWith(Parameterized.class)
 public final class PromoteNameToValueTest {
+  @Parameter public JsonCodecFactory factory;
+
+  @Parameters(name = "{0}")
+  public static List<Object[]> parameters() {
+    return JsonCodecFactory.factories();
+  }
+
   @Test public void readerStringValue() throws Exception {
-    JsonReader reader = newReader("{\"a\":1}");
+    JsonReader reader = factory.newReader("{\"a\":1}");
     reader.beginObject();
     reader.promoteNameToValue();
     assertThat(reader.getPath()).isEqualTo("$.a");
@@ -37,7 +50,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerIntegerValue() throws Exception {
-    JsonReader reader = newReader("{\"5\":1}");
+    JsonReader reader = factory.newReader("{\"5\":1}");
     reader.beginObject();
     reader.promoteNameToValue();
     assertThat(reader.getPath()).isEqualTo("$.5");
@@ -51,7 +64,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerDoubleValue() throws Exception {
-    JsonReader reader = newReader("{\"5.5\":1}");
+    JsonReader reader = factory.newReader("{\"5.5\":1}");
     reader.beginObject();
     reader.promoteNameToValue();
     assertThat(reader.getPath()).isEqualTo("$.5.5");
@@ -65,7 +78,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerBooleanValue() throws Exception {
-    JsonReader reader = newReader("{\"true\":1}");
+    JsonReader reader = factory.newReader("{\"true\":1}");
     reader.beginObject();
     reader.promoteNameToValue();
     assertThat(reader.getPath()).isEqualTo("$.true");
@@ -74,7 +87,9 @@ public final class PromoteNameToValueTest {
       reader.nextBoolean();
       fail();
     } catch (JsonDataException e) {
-      assertThat(e).hasMessage("Expected a boolean but was STRING at path $.true");
+      assertThat(e.getMessage()).isIn(
+          "Expected BOOLEAN but was true, a java.lang.String, at path $.true",
+          "Expected a boolean but was STRING at path $.true");
     }
     assertThat(reader.getPath()).isEqualTo("$.true");
     assertThat(reader.nextString()).isEqualTo("true");
@@ -85,7 +100,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerLongValue() throws Exception {
-    JsonReader reader = newReader("{\"5\":1}");
+    JsonReader reader = factory.newReader("{\"5\":1}");
     reader.beginObject();
     reader.promoteNameToValue();
     assertThat(reader.getPath()).isEqualTo("$.5");
@@ -99,7 +114,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerNullValue() throws Exception {
-    JsonReader reader = newReader("{\"null\":1}");
+    JsonReader reader = factory.newReader("{\"null\":1}");
     reader.beginObject();
     reader.promoteNameToValue();
     assertThat(reader.getPath()).isEqualTo("$.null");
@@ -108,7 +123,9 @@ public final class PromoteNameToValueTest {
       reader.nextNull();
       fail();
     } catch (JsonDataException e) {
-      assertThat(e).hasMessage("Expected null but was STRING at path $.null");
+      assertThat(e.getMessage()).isIn(
+          "Expected NULL but was null, a java.lang.String, at path $.null",
+          "Expected null but was STRING at path $.null");
     }
     assertThat(reader.nextString()).isEqualTo("null");
     assertThat(reader.getPath()).isEqualTo("$.null");
@@ -119,7 +136,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerMultipleValueObject() throws Exception {
-    JsonReader reader = newReader("{\"a\":1,\"b\":2}");
+    JsonReader reader = factory.newReader("{\"a\":1,\"b\":2}");
     reader.beginObject();
     assertThat(reader.nextName()).isEqualTo("a");
     assertThat(reader.nextInt()).isEqualTo(1);
@@ -135,7 +152,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerEmptyValueObject() throws Exception {
-    JsonReader reader = newReader("{}");
+    JsonReader reader = factory.newReader("{}");
     reader.beginObject();
     assertThat(reader.peek()).isEqualTo(JsonReader.Token.END_OBJECT);
     reader.promoteNameToValue();
@@ -145,7 +162,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerUnusedPromotionDoesntPersist() throws Exception {
-    JsonReader reader = newReader("[{},{\"a\":5}]");
+    JsonReader reader = factory.newReader("[{},{\"a\":5}]");
     reader.beginArray();
     reader.beginObject();
     reader.promoteNameToValue();
@@ -160,7 +177,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerUnquotedIntegerValue() throws Exception {
-    JsonReader reader = newReader("{5:1}");
+    JsonReader reader = factory.newReader("{5:1}");
     reader.setLenient(true);
     reader.beginObject();
     reader.promoteNameToValue();
@@ -170,7 +187,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerUnquotedLongValue() throws Exception {
-    JsonReader reader = newReader("{5:1}");
+    JsonReader reader = factory.newReader("{5:1}");
     reader.setLenient(true);
     reader.beginObject();
     reader.promoteNameToValue();
@@ -180,7 +197,7 @@ public final class PromoteNameToValueTest {
   }
 
   @Test public void readerUnquotedDoubleValue() throws Exception {
-    JsonReader reader = newReader("{5:1}");
+    JsonReader reader = factory.newReader("{5:1}");
     reader.setLenient(true);
     reader.beginObject();
     reader.promoteNameToValue();
@@ -189,95 +206,85 @@ public final class PromoteNameToValueTest {
     reader.endObject();
   }
 
-  private JsonReader newReader(String s) {
-    return JsonReader.of(new Buffer().writeUtf8(s));
-  }
-
   @Test public void writerStringValue() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     writer.value("a");
     assertThat(writer.getPath()).isEqualTo("$.a");
     writer.value(1);
     assertThat(writer.getPath()).isEqualTo("$.a");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"a\":1}");
+    assertThat(factory.json()).isEqualTo("{\"a\":1}");
   }
 
   @Test public void writerIntegerValue() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     writer.value(5);
     assertThat(writer.getPath()).isEqualTo("$.5");
     writer.value(1);
     assertThat(writer.getPath()).isEqualTo("$.5");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"5\":1}");
+    assertThat(factory.json()).isEqualTo("{\"5\":1}");
   }
 
   @Test public void writerDoubleValue() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     writer.value(5.5d);
     assertThat(writer.getPath()).isEqualTo("$.5.5");
     writer.value(1);
     assertThat(writer.getPath()).isEqualTo("$.5.5");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"5.5\":1}");
+    assertThat(factory.json()).isEqualTo("{\"5.5\":1}");
   }
 
   @Test public void writerBooleanValue() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     try {
       writer.value(true);
       fail();
     } catch (IllegalStateException e) {
-      assertThat(e).hasMessage("Nesting problem.");
+      assertThat(e).hasMessage("Boolean cannot be used as a map key in JSON at path $.");
     }
     writer.value("true");
     assertThat(writer.getPath()).isEqualTo("$.true");
     writer.value(1);
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"true\":1}");
+    assertThat(factory.json()).isEqualTo("{\"true\":1}");
   }
 
   @Test public void writerLongValue() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     writer.value(5L);
     assertThat(writer.getPath()).isEqualTo("$.5");
     writer.value(1);
     assertThat(writer.getPath()).isEqualTo("$.5");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"5\":1}");
+    assertThat(factory.json()).isEqualTo("{\"5\":1}");
   }
 
   @Test public void writerNullValue() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     try {
       writer.nullValue();
       fail();
     } catch (IllegalStateException e) {
-      assertThat(e).hasMessage("Nesting problem.");
+      assertThat(e).hasMessage("null cannot be used as a map key in JSON at path $.");
     }
     writer.value("null");
     assertThat(writer.getPath()).isEqualTo("$.null");
@@ -285,42 +292,39 @@ public final class PromoteNameToValueTest {
     assertThat(writer.getPath()).isEqualTo("$.null");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"null\":1}");
+    assertThat(factory.json()).isEqualTo("{\"null\":1}");
   }
 
   @Test public void writerMultipleValueObject() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
     writer.name("a");
     writer.value(1);
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     writer.value("b");
     assertThat(writer.getPath()).isEqualTo("$.b");
     writer.value(2);
     assertThat(writer.getPath()).isEqualTo("$.b");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{\"a\":1,\"b\":2}");
+    assertThat(factory.json()).isEqualTo("{\"a\":1,\"b\":2}");
   }
 
   @Test public void writerEmptyValueObject() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     assertThat(writer.getPath()).isEqualTo("$.");
     writer.endObject();
     assertThat(writer.getPath()).isEqualTo("$");
-    assertThat(buffer.readUtf8()).isEqualTo("{}");
+    assertThat(factory.json()).isEqualTo("{}");
   }
 
   @Test public void writerUnusedPromotionDoesntPersist() throws Exception {
-    Buffer buffer = new Buffer();
-    JsonWriter writer = JsonWriter.of(buffer);
+    JsonWriter writer = factory.newWriter();
     writer.beginArray();
     writer.beginObject();
-    writer.promoteNameToValue();
+    writer.promoteValueToName();
     writer.endObject();
     writer.beginObject();
     try {
@@ -329,5 +333,39 @@ public final class PromoteNameToValueTest {
     } catch (IllegalStateException expected) {
     }
     writer.name("a");
+  }
+
+  @Test public void writerSourceValueFails() throws Exception {
+    JsonWriter writer = factory.newWriter();
+    writer.beginObject();
+    writer.promoteValueToName();
+    try {
+      writer.value(new Buffer().writeUtf8("\"a\""));
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage(
+          "BufferedSource cannot be used as a map key in JSON at path $.");
+    }
+    writer.value("a");
+    writer.value("a value");
+    writer.endObject();
+    assertThat(factory.json()).isEqualTo("{\"a\":\"a value\"}");
+  }
+
+  @Test public void writerValueSinkFails() throws Exception {
+    JsonWriter writer = factory.newWriter();
+    writer.beginObject();
+    writer.promoteValueToName();
+    try {
+      writer.valueSink();
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage(
+          "BufferedSink cannot be used as a map key in JSON at path $.");
+    }
+    writer.value("a");
+    writer.value("a value");
+    writer.endObject();
+    assertThat(factory.json()).isEqualTo("{\"a\":\"a value\"}");
   }
 }

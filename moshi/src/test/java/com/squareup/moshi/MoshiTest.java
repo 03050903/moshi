@@ -16,6 +16,7 @@
 package com.squareup.moshi;
 
 import android.util.Pair;
+import com.squareup.moshi.internal.Util;
 import java.io.File;
 import java.io.IOException;
 import java.lang.annotation.Annotation;
@@ -23,20 +24,30 @@ import java.lang.annotation.Retention;
 import java.lang.reflect.Field;
 import java.lang.reflect.Type;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import javax.annotation.Nullable;
 import javax.crypto.KeyGenerator;
+import okio.Buffer;
 import org.junit.Test;
 
 import static com.squareup.moshi.TestUtil.newReader;
+import static com.squareup.moshi.TestUtil.repeat;
 import static java.lang.annotation.RetentionPolicy.RUNTIME;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
 
+@SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
 public final class MoshiTest {
   @Test public void booleanAdapter() throws Exception {
     Moshi moshi = new Moshi.Builder().build();
@@ -429,21 +440,19 @@ public final class MoshiTest {
     assertThat(adapter.fromJson("9223372036854775807")).isEqualTo(Long.MAX_VALUE);
     assertThat(adapter.toJson(Long.MAX_VALUE)).isEqualTo("9223372036854775807");
 
-    // TODO: This is a bug?
-    assertThat(adapter.fromJson("9223372036854775808")).isEqualTo(Long.MAX_VALUE); // wtf?
-    //try {
-    //  adapter.fromJson("9223372036854775808");
-    //  fail();
-    //} catch (NumberFormatException expected) {
-    //  assertThat(expected).hasMessage("Expected a long but was 9223372036854775808 at path $");
-    //}
-    //
-    //try {
-    //  adapter.fromJson("-9223372036854775809");
-    //  fail();
-    //} catch (NumberFormatException expected) {
-    //  assertThat(expected).hasMessage("Expected a long but was -9223372036854775809 at path $");
-    //}
+    try {
+      adapter.fromJson("9223372036854775808");
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage("Expected a long but was 9223372036854775808 at path $");
+    }
+
+    try {
+      adapter.fromJson("-9223372036854775809");
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage("Expected a long but was -9223372036854775809 at path $");
+    }
 
     // Nulls not allowed for long.class
     try {
@@ -530,6 +539,73 @@ public final class MoshiTest {
     assertThat(adapter.toJson(null)).isEqualTo("null");
   }
 
+  @Test public void upperBoundedWildcardsAreHandled() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    JsonAdapter<Object> adapter = moshi.adapter(Types.subtypeOf(String.class));
+    assertThat(adapter.fromJson("\"a\"")).isEqualTo("a");
+    assertThat(adapter.toJson("b")).isEqualTo("\"b\"");
+    assertThat(adapter.fromJson("null")).isEqualTo(null);
+    assertThat(adapter.toJson(null)).isEqualTo("null");
+  }
+
+  @Test public void lowerBoundedWildcardsAreNotHandled() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(Types.supertypeOf(String.class));
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage("No JsonAdapter for ? super java.lang.String (with no annotations)");
+    }
+  }
+
+  @Test public void addNullFails() throws Exception {
+    Type type = Object.class;
+    Class<? extends Annotation> annotation = Annotation.class;
+    Moshi.Builder builder = new Moshi.Builder();
+    try {
+      builder.add((null));
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("factory == null");
+    }
+    try {
+      builder.add((Object) null);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("adapter == null");
+    }
+    try {
+      builder.add(null, null);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("type == null");
+    }
+    try {
+      builder.add(type, null);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("jsonAdapter == null");
+    }
+    try {
+      builder.add(null, null, null);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("type == null");
+    }
+    try {
+      builder.add(type, null, null);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("annotation == null");
+    }
+    try {
+      builder.add(type, annotation, null);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("jsonAdapter == null");
+    }
+  }
+
   @Test public void customJsonAdapter() throws Exception {
     Moshi moshi = new Moshi.Builder()
         .add(Pizza.class, new PizzaAdapter())
@@ -540,6 +616,72 @@ public final class MoshiTest {
         .isEqualTo("{\"size\":15,\"extra cheese\":true}");
     assertThat(jsonAdapter.fromJson("{\"extra cheese\":true,\"size\":18}"))
         .isEqualTo(new Pizza(18, true));
+  }
+
+  @Test public void classAdapterToObjectAndFromObject() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+
+    Pizza pizza = new Pizza(15, true);
+
+    Map<String, Object> pizzaObject = new LinkedHashMap<>();
+    pizzaObject.put("diameter", 15L);
+    pizzaObject.put("extraCheese", true);
+
+    JsonAdapter<Pizza> jsonAdapter = moshi.adapter(Pizza.class);
+    assertThat(jsonAdapter.toJsonValue(pizza)).isEqualTo(pizzaObject);
+    assertThat(jsonAdapter.fromJsonValue(pizzaObject)).isEqualTo(pizza);
+  }
+
+  @Test public void customJsonAdapterToObjectAndFromObject() throws Exception {
+    Moshi moshi = new Moshi.Builder()
+        .add(Pizza.class, new PizzaAdapter())
+        .build();
+
+    Pizza pizza = new Pizza(15, true);
+
+    Map<String, Object> pizzaObject = new LinkedHashMap<>();
+    pizzaObject.put("size", 15L);
+    pizzaObject.put("extra cheese", true);
+
+    JsonAdapter<Pizza> jsonAdapter = moshi.adapter(Pizza.class);
+    assertThat(jsonAdapter.toJsonValue(pizza)).isEqualTo(pizzaObject);
+    assertThat(jsonAdapter.fromJsonValue(pizzaObject)).isEqualTo(pizza);
+  }
+
+  @Test public void indent() throws Exception {
+    Moshi moshi = new Moshi.Builder().add(Pizza.class, new PizzaAdapter()).build();
+    JsonAdapter<Pizza> jsonAdapter = moshi.adapter(Pizza.class);
+
+    Pizza pizza = new Pizza(15, true);
+    assertThat(jsonAdapter.indent("  ").toJson(pizza)).isEqualTo(""
+        + "{\n"
+        + "  \"size\": 15,\n"
+        + "  \"extra cheese\": true\n"
+        + "}");
+  }
+
+  @Test public void unindent() throws Exception {
+    Moshi moshi = new Moshi.Builder().add(Pizza.class, new PizzaAdapter()).build();
+    JsonAdapter<Pizza> jsonAdapter = moshi.adapter(Pizza.class);
+
+    Buffer buffer = new Buffer();
+    JsonWriter writer = JsonWriter.of(buffer);
+    writer.setLenient(true);
+    writer.setIndent("  ");
+
+    Pizza pizza = new Pizza(15, true);
+
+    // Calling JsonAdapter.indent("") can remove indentation.
+    jsonAdapter.indent("").toJson(writer, pizza);
+    assertThat(buffer.readUtf8()).isEqualTo("{\"size\":15,\"extra cheese\":true}");
+
+    // Indentation changes only apply to their use.
+    jsonAdapter.toJson(writer, pizza);
+    assertThat(buffer.readUtf8()).isEqualTo(""
+        + "{\n"
+        + "  \"size\": 15,\n"
+        + "  \"extra cheese\": true\n"
+        + "}");
   }
 
   @Test public void composingJsonAdapterFactory() throws Exception {
@@ -583,6 +725,49 @@ public final class MoshiTest {
 
     assertThat(messageAdapter.toJson(message))
         .isEqualTo("{\"shout\":\"WHAT'S UP\",\"speak\":\"Yo dog\"}");
+  }
+
+  @Test public void adapterLookupDisallowsNullType() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(null, Collections.<Annotation>emptySet());
+      fail();
+    } catch (NullPointerException expected) {
+      assertThat(expected).hasMessage("type == null");
+    }
+  }
+
+  @Test public void adapterLookupDisallowsNullAnnotations() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(String.class, (Class<? extends Annotation>) null);
+      fail();
+    } catch (NullPointerException expected) {
+      assertThat(expected).hasMessage("annotationType == null");
+    }
+    try {
+      moshi.adapter(String.class, (Set<? extends Annotation>) null);
+      fail();
+    } catch (NullPointerException expected) {
+      assertThat(expected).hasMessage("annotations == null");
+    }
+  }
+
+  @Test public void nextJsonAdapterDisallowsNullAnnotations() throws Exception {
+    JsonAdapter.Factory badFactory = new JsonAdapter.Factory() {
+      @Nullable @Override
+      public JsonAdapter<?> create(Type type, Set<? extends Annotation> annotations,
+          Moshi moshi) {
+        return moshi.nextAdapter(this, type, null);
+      }
+    };
+    Moshi moshi = new Moshi.Builder().add(badFactory).build();
+    try {
+      moshi.adapter(Object.class);
+      fail();
+    } catch (NullPointerException expected) {
+      assertThat(expected).hasMessage("annotations == null");
+    }
   }
 
   @Uppercase
@@ -651,6 +836,19 @@ public final class MoshiTest {
     }
   }
 
+  @Test public void noTypeAdapterForQualifiedPlatformType() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    Field uppercaseStringField = MoshiTest.class.getDeclaredField("uppercaseString");
+    try {
+      moshi.adapter(uppercaseStringField.getGenericType(),
+          Util.jsonAnnotations(uppercaseStringField));
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("No JsonAdapter for class java.lang.String "
+          + "annotated [@com.squareup.moshi.MoshiTest$Uppercase()]");
+    }
+  }
+
   @Test public void objectArray() throws Exception {
     Moshi moshi = new Moshi.Builder().build();
     JsonAdapter<String[]> adapter = moshi.adapter(String[].class);
@@ -681,7 +879,7 @@ public final class MoshiTest {
 
   @Test public void invalidEnum() throws Exception {
     Moshi moshi = new Moshi.Builder().build();
-    JsonAdapter<Roshambo> adapter = moshi.adapter(Roshambo.class).lenient();
+    JsonAdapter<Roshambo> adapter = moshi.adapter(Roshambo.class);
     try {
       adapter.fromJson("\"SPOCK\"");
       fail();
@@ -689,6 +887,22 @@ public final class MoshiTest {
       assertThat(expected).hasMessage(
           "Expected one of [ROCK, PAPER, scr] but was SPOCK at path $");
     }
+  }
+
+  @Test public void invalidEnumHasCorrectPathInExceptionMessage() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    JsonAdapter<Roshambo> adapter = moshi.adapter(Roshambo.class);
+    JsonReader reader = JsonReader.of(new Buffer().writeUtf8("[\"SPOCK\"]"));
+    reader.beginArray();
+    try {
+      adapter.fromJson(reader);
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage(
+          "Expected one of [ROCK, PAPER, scr] but was SPOCK at path $[0]");
+    }
+    reader.endArray();
+    assertThat(reader.peek()).isEqualTo(JsonReader.Token.END_DOCUMENT);
   }
 
   @Test public void nullEnum() throws Exception {
@@ -713,7 +927,7 @@ public final class MoshiTest {
       adapter.fromJson("{\"diameter\":5,\"crust\":\"thick\",\"extraCheese\":true}");
       fail();
     } catch (JsonDataException expected) {
-      assertThat(expected).hasMessage("Cannot skip unexpected STRING at $.crust");
+      assertThat(expected).hasMessage("Cannot skip unexpected NAME at $.crust");
     }
   }
 
@@ -724,21 +938,129 @@ public final class MoshiTest {
       fail();
     } catch (IllegalArgumentException e) {
       assertThat(e).hasMessage(
-          "Platform class java.io.File annotated [] requires explicit JsonAdapter to be registered");
+          "Platform class java.io.File requires explicit JsonAdapter to be registered");
     }
     try {
       moshi.adapter(KeyGenerator.class);
       fail();
     } catch (IllegalArgumentException e) {
-      assertThat(e).hasMessage(
-          "Platform class javax.crypto.KeyGenerator annotated [] requires explicit JsonAdapter to be registered");
+      assertThat(e).hasMessage("Platform class javax.crypto.KeyGenerator requires explicit "
+          + "JsonAdapter to be registered");
     }
     try {
       moshi.adapter(Pair.class);
       fail();
     } catch (IllegalArgumentException e) {
       assertThat(e).hasMessage(
-          "Platform class android.util.Pair annotated [] requires explicit JsonAdapter to be registered");
+          "Platform class android.util.Pair requires explicit JsonAdapter to be registered");
+    }
+  }
+
+  @Test public void collectionClassesHaveClearErrorMessage() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(Types.newParameterizedType(ArrayList.class, String.class));
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage("No JsonAdapter for "
+          + "java.util.ArrayList<java.lang.String>, "
+          + "you should probably use List instead of ArrayList "
+          + "(Moshi only supports the collection interfaces by default) "
+          + "or else register a custom JsonAdapter.");
+    }
+
+    try {
+      moshi.adapter(Types.newParameterizedType(HashMap.class, String.class, String.class));
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage("No JsonAdapter for "
+          + "java.util.HashMap<java.lang.String, java.lang.String>, "
+          + "you should probably use Map instead of HashMap "
+          + "(Moshi only supports the collection interfaces by default) "
+          + "or else register a custom JsonAdapter.");
+    }
+  }
+
+  @Test public void noCollectionErrorIfAdapterExplicitlyProvided() {
+    Moshi moshi = new Moshi.Builder()
+        .add(new JsonAdapter.Factory() {
+          @Override public JsonAdapter<?> create(Type type, Set<? extends Annotation> annotations,
+              Moshi moshi) {
+            return new MapJsonAdapter<String, String>(moshi, String.class, String.class);
+          }
+        })
+        .build();
+
+    JsonAdapter<HashMap<String, String>> adapter = moshi.adapter(
+            Types.newParameterizedType(HashMap.class, String.class, String.class));
+    assertThat(adapter).isInstanceOf(MapJsonAdapter.class);
+  }
+
+  static final class HasPlatformType {
+    UUID uuid;
+
+    static final class Wrapper {
+      HasPlatformType hasPlatformType;
+    }
+
+    static final class ListWrapper {
+      List<HasPlatformType> platformTypes;
+    }
+  }
+
+  @Test public void reentrantFieldErrorMessagesTopLevelMap() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(Types.newParameterizedType(Map.class, String.class, HasPlatformType.class));
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage(
+          "Platform class java.util.UUID requires explicit "
+              + "JsonAdapter to be registered"
+              + "\nfor class java.util.UUID uuid"
+              + "\nfor class com.squareup.moshi.MoshiTest$HasPlatformType"
+              + "\nfor java.util.Map<java.lang.String, "
+              + "com.squareup.moshi.MoshiTest$HasPlatformType>");
+      assertThat(e).hasCauseExactlyInstanceOf(IllegalArgumentException.class);
+      assertThat(e.getCause()).hasMessage("Platform class java.util.UUID "
+          + "requires explicit JsonAdapter to be registered");
+    }
+  }
+
+  @Test public void reentrantFieldErrorMessagesWrapper() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(HasPlatformType.Wrapper.class);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage(
+          "Platform class java.util.UUID requires explicit "
+              + "JsonAdapter to be registered"
+              + "\nfor class java.util.UUID uuid"
+              + "\nfor class com.squareup.moshi.MoshiTest$HasPlatformType hasPlatformType"
+              + "\nfor class com.squareup.moshi.MoshiTest$HasPlatformType$Wrapper");
+      assertThat(e).hasCauseExactlyInstanceOf(IllegalArgumentException.class);
+      assertThat(e.getCause()).hasMessage("Platform class java.util.UUID "
+          + "requires explicit JsonAdapter to be registered");
+    }
+  }
+
+  @Test public void reentrantFieldErrorMessagesListWrapper() {
+    Moshi moshi = new Moshi.Builder().build();
+    try {
+      moshi.adapter(HasPlatformType.ListWrapper.class);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage(
+          "Platform class java.util.UUID requires explicit "
+              + "JsonAdapter to be registered"
+              + "\nfor class java.util.UUID uuid"
+              + "\nfor class com.squareup.moshi.MoshiTest$HasPlatformType"
+              + "\nfor java.util.List<com.squareup.moshi.MoshiTest$HasPlatformType> platformTypes"
+              + "\nfor class com.squareup.moshi.MoshiTest$HasPlatformType$ListWrapper");
+      assertThat(e).hasCauseExactlyInstanceOf(IllegalArgumentException.class);
+      assertThat(e.getCause()).hasMessage("Platform class java.util.UUID "
+          + "requires explicit JsonAdapter to be registered");
     }
   }
 
@@ -814,6 +1136,67 @@ public final class MoshiTest {
     for (JsonAdapter.Factory factory : Moshi.BUILT_IN_FACTORIES) {
       assertThat(factory).isNotIn(newBuilder.factories);
     }
+  }
+
+  @Test public void referenceCyclesOnArrays() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    Map<String, Object> map = new LinkedHashMap<>();
+    map.put("a", map);
+    try {
+      moshi.adapter(Object.class).toJson(map);
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage("Nesting too deep at $"
+          + repeat(".a", 255) + ": circular reference?");
+    }
+  }
+
+  @Test public void referenceCyclesOnObjects() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    List<Object> list = new ArrayList<>();
+    list.add(list);
+    try {
+      moshi.adapter(Object.class).toJson(list);
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage("Nesting too deep at $"
+          + repeat("[0]", 255) + ": circular reference?");
+    }
+  }
+
+  @Test public void referenceCyclesOnMixedTypes() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    List<Object> list = new ArrayList<>();
+    Map<String, Object> map = new LinkedHashMap<>();
+    list.add(map);
+    map.put("a", list);
+    try {
+      moshi.adapter(Object.class).toJson(list);
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage("Nesting too deep at $[0]"
+          + repeat(".a[0]", 127) + ": circular reference?");
+    }
+  }
+
+  @Test public void duplicateKeyDisallowedInObjectType() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    JsonAdapter<Object> adapter = moshi.adapter(Object.class);
+    String json = "{\"diameter\":5,\"diameter\":5,\"extraCheese\":true}";
+    try {
+      adapter.fromJson(json);
+      fail();
+    } catch (JsonDataException expected) {
+      assertThat(expected).hasMessage(
+          "Map key 'diameter' has multiple values at path $.diameter: 5.0 and 5.0");
+    }
+  }
+
+  @Test public void duplicateKeysAllowedInCustomType() throws Exception {
+    Moshi moshi = new Moshi.Builder().build();
+    JsonAdapter<Pizza> adapter = moshi.adapter(Pizza.class);
+    String json = "{\"diameter\":5,\"diameter\":5,\"extraCheese\":true}";
+    assertThat(adapter.fromJson(json)).isEqualTo(new Pizza(5, true));
   }
 
   static class Pizza {

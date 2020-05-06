@@ -19,17 +19,18 @@ import java.io.IOException;
 import java.util.Date;
 
 /**
- * Formats dates using <a href="https://www.ietf.org/rfc/rfc3339.txt">RFC 3339</a>, which is
- * formatted like {@code 2015-09-26T18:23:50.250Z}.
+ * @deprecated this class moved to avoid a package name conflict in the Java Platform Module System.
+ *     The new class is {@code com.squareup.moshi.adapters.Rfc3339DateJsonAdapter}.
  */
 public final class Rfc3339DateJsonAdapter extends JsonAdapter<Date> {
-  @Override public synchronized Date fromJson(JsonReader reader) throws IOException {
-    String string = reader.nextString();
-    return Iso8601Utils.parse(string);
+  private final com.squareup.moshi.adapters.Rfc3339DateJsonAdapter delegate
+      = new com.squareup.moshi.adapters.Rfc3339DateJsonAdapter();
+
+  @Override public Date fromJson(JsonReader reader) throws IOException {
+    return delegate.fromJson(reader);
   }
 
-  @Override public synchronized void toJson(JsonWriter writer, Date value) throws IOException {
-    String string = Iso8601Utils.format(value);
-    writer.value(string);
+  @Override public void toJson(JsonWriter writer, Date value) throws IOException {
+    delegate.toJson(writer, value);
   }
 }

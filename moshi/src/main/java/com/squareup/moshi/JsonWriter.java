@@ -18,7 +18,18 @@ package com.squareup.moshi;
 import java.io.Closeable;
 import java.io.Flushable;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.CheckReturnValue;
+import javax.annotation.Nullable;
 import okio.BufferedSink;
+import okio.BufferedSource;
+
+import static com.squareup.moshi.JsonScope.EMPTY_ARRAY;
+import static com.squareup.moshi.JsonScope.EMPTY_OBJECT;
+import static com.squareup.moshi.JsonScope.NONEMPTY_ARRAY;
+import static com.squareup.moshi.JsonScope.NONEMPTY_OBJECT;
 
 /**
  * Writes a JSON (<a href="http://www.ietf.org/rfc/rfc7159.txt">RFC 7159</a>)
@@ -68,7 +79,7 @@ import okio.BufferedSink;
  * This code encodes the above structure: <pre>   {@code
  *   public void writeJsonStream(BufferedSink sink, List<Message> messages) throws IOException {
  *     JsonWriter writer = JsonWriter.of(sink);
- *     writer.setIndentSpaces(4);
+ *     writer.setIndent("  ");
  *     writeMessagesArray(writer, messages);
  *     writer.close();
  *   }
@@ -116,15 +127,86 @@ import okio.BufferedSink;
  * malformed JSON string will fail with an {@link IllegalStateException}.
  */
 public abstract class JsonWriter implements Closeable, Flushable {
+  // The nesting stack. Using a manual array rather than an ArrayList saves 20%. This stack will
+  // grow itself up to 256 levels of nesting including the top-level document. Deeper nesting is
+  // prone to trigger StackOverflowErrors.
+  int stackSize = 0;
+  int[] scopes = new int[32];
+  String[] pathNames = new String[32];
+  int[] pathIndices = new int[32];
+
   /**
-   * Returns a new instance that writes a JSON-encoded stream to {@code sink}.
+   * A string containing a full set of spaces for a single level of indentation, or null for no
+   * pretty printing.
    */
-  public static JsonWriter of(BufferedSink sink) {
-    return new BufferedSinkJsonWriter(sink);
+  String indent;
+  boolean lenient;
+  boolean serializeNulls;
+  boolean promoteValueToName;
+
+  /**
+   * Controls the deepest stack size that has begin/end pairs flattened:
+   *
+   * <ul>
+   *     <li>If -1, no begin/end pairs are being suppressed.
+   *     <li>If positive, this is the deepest stack size whose begin/end pairs are eligible to be
+   *         flattened.
+   *     <li>If negative, it is the bitwise inverse (~) of the deepest stack size whose begin/end
+   *         pairs have been flattened.
+   * </ul>
+   *
+   * <p>We differentiate between what layer would be flattened (positive) from what layer is being
+   * flattened (negative) so that we don't double-flatten.
+   *
+   * <p>To accommodate nested flattening we require callers to track the previous state when they
+   * provide a new state. The previous state is returned from {@link #beginFlatten} and restored
+   * with {@link #endFlatten}.
+   */
+  int flattenStackSize = -1;
+
+  /** Returns a new instance that writes UTF-8 encoded JSON to {@code sink}. */
+  @CheckReturnValue public static JsonWriter of(BufferedSink sink) {
+    return new JsonUtf8Writer(sink);
   }
 
   JsonWriter() {
     // Package-private to control subclasses.
+  }
+
+  /** Returns the scope on the top of the stack. */
+  final int peekScope() {
+    if (stackSize == 0) {
+      throw new IllegalStateException("JsonWriter is closed.");
+    }
+    return scopes[stackSize - 1];
+  }
+
+  /** Before pushing a value on the stack this confirms that the stack has capacity. */
+  final boolean checkStack() {
+    if (stackSize != scopes.length) return false;
+
+    if (stackSize == 256) {
+      throw new JsonDataException("Nesting too deep at " + getPath() + ": circular reference?");
+    }
+
+    scopes = Arrays.copyOf(scopes, scopes.length * 2);
+    pathNames = Arrays.copyOf(pathNames, pathNames.length * 2);
+    pathIndices = Arrays.copyOf(pathIndices, pathIndices.length * 2);
+    if (this instanceof JsonValueWriter) {
+      ((JsonValueWriter) this).stack =
+          Arrays.copyOf(((JsonValueWriter) this).stack, ((JsonValueWriter) this).stack.length * 2);
+    }
+
+    return true;
+  }
+
+  final void pushScope(int newTop) {
+    scopes[stackSize++] = newTop;
+  }
+
+  /** Replace the value on the top of the stack with the given value. */
+  final void replaceTop(int topOfStack) {
+    scopes[stackSize - 1] = topOfStack;
   }
 
   /**
@@ -135,7 +217,17 @@ public abstract class JsonWriter implements Closeable, Flushable {
    *
    * @param indent a string containing only whitespace.
    */
-  public abstract void setIndent(String indent);
+  public void setIndent(String indent) {
+    this.indent = !indent.isEmpty() ? indent : null;
+  }
+
+  /**
+   * Returns a string containing only whitespace, used for each level of
+   * indentation. If empty, the encoded document will be compact.
+   */
+  @CheckReturnValue public final String getIndent() {
+    return indent != null ? indent : "";
+  }
 
   /**
    * Configure this writer to relax its syntax rules. By default, this writer
@@ -149,24 +241,32 @@ public abstract class JsonWriter implements Closeable, Flushable {
    *       Double#isInfinite() infinities}.
    * </ul>
    */
-  public abstract void setLenient(boolean lenient);
+  public final void setLenient(boolean lenient) {
+    this.lenient = lenient;
+  }
 
   /**
    * Returns true if this writer has relaxed syntax rules.
    */
-  public abstract boolean isLenient();
+  @CheckReturnValue public final boolean isLenient() {
+    return lenient;
+  }
 
   /**
    * Sets whether object members are serialized when their value is null.
    * This has no impact on array elements. The default is false.
    */
-  public abstract void setSerializeNulls(boolean serializeNulls);
+  public final void setSerializeNulls(boolean serializeNulls) {
+    this.serializeNulls = serializeNulls;
+  }
 
   /**
    * Returns true if object members are serialized when their value is null.
    * This has no impact on array elements. The default is false.
    */
-  public abstract boolean getSerializeNulls();
+  @CheckReturnValue public final boolean getSerializeNulls() {
+    return serializeNulls;
+  }
 
   /**
    * Begins encoding a new array. Each call to this method must be paired with
@@ -201,7 +301,7 @@ public abstract class JsonWriter implements Closeable, Flushable {
   /**
    * Encodes the property name.
    *
-   * @param name the name of the forthcoming value. May not be null.
+   * @param name the name of the forthcoming value. Must not be null.
    * @return this writer.
    */
   public abstract JsonWriter name(String name) throws IOException;
@@ -212,7 +312,7 @@ public abstract class JsonWriter implements Closeable, Flushable {
    * @param value the literal string value, or null to encode a null literal.
    * @return this writer.
    */
-  public abstract JsonWriter value(String value) throws IOException;
+  public abstract JsonWriter value(@Nullable String value) throws IOException;
 
   /**
    * Encodes {@code null}.
@@ -233,7 +333,7 @@ public abstract class JsonWriter implements Closeable, Flushable {
    *
    * @return this writer.
    */
-  public abstract JsonWriter value(Boolean value) throws IOException;
+  public abstract JsonWriter value(@Nullable Boolean value) throws IOException;
 
   /**
    * Encodes {@code value}.
@@ -258,17 +358,187 @@ public abstract class JsonWriter implements Closeable, Flushable {
    *     {@linkplain Double#isInfinite() infinities}.
    * @return this writer.
    */
-  public abstract JsonWriter value(Number value) throws IOException;
+  public abstract JsonWriter value(@Nullable Number value) throws IOException;
 
   /**
-   * Changes the reader to treat the next string value as a name. This is useful for map adapters so
-   * that arbitrary type adapters can use {@link #value(String)} to write a name value.
+   * Writes {@code source} directly without encoding its contents. Equivalent to
+   * {@code try (BufferedSink sink = writer.valueSink()) { source.readAll(sink): }}
+   *
+   * @see #valueSink()
    */
-  abstract void promoteNameToValue() throws IOException;
+  public final JsonWriter value(BufferedSource source) throws IOException {
+    if (promoteValueToName) {
+      throw new IllegalStateException(
+          "BufferedSource cannot be used as a map key in JSON at path " + getPath());
+    }
+    try (BufferedSink sink = valueSink()) {
+      source.readAll(sink);
+    }
+    return this;
+  }
+
+  /**
+   * Returns a {@link BufferedSink} into which arbitrary data can be written without any additional
+   * encoding. You <b>must</b> call {@link BufferedSink#close()} before interacting with this
+   * {@code JsonWriter} instance again.
+   * <p>
+   * Since no validation is performed, options like {@link #setSerializeNulls} and other writer
+   * configurations are not respected.
+   */
+  @CheckReturnValue
+  public abstract BufferedSink valueSink() throws IOException;
+
+  /**
+   * Encodes the value which may be a string, number, boolean, null, map, or list.
+   *
+   * @return this writer.
+   * @see JsonReader#readJsonValue()
+   */
+  public final JsonWriter jsonValue(@Nullable Object value) throws IOException {
+    if (value instanceof Map<?, ?>) {
+      beginObject();
+      for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+        Object key = entry.getKey();
+        if (!(key instanceof String)) {
+          throw new IllegalArgumentException(key == null
+              ? "Map keys must be non-null"
+              : "Map keys must be of type String: " + key.getClass().getName());
+        }
+        name(((String) key));
+        jsonValue(entry.getValue());
+      }
+      endObject();
+
+    } else if (value instanceof List<?>) {
+      beginArray();
+      for (Object element : ((List<?>) value)) {
+        jsonValue(element);
+      }
+      endArray();
+
+    } else if (value instanceof String) {
+      value(((String) value));
+
+    } else if (value instanceof Boolean) {
+      value(((Boolean) value).booleanValue());
+
+    } else if (value instanceof Double) {
+      value(((Double) value).doubleValue());
+
+    } else if (value instanceof Long) {
+      value(((Long) value).longValue());
+
+    } else if (value instanceof Number) {
+      value(((Number) value));
+
+    } else if (value == null) {
+      nullValue();
+
+    } else {
+      throw new IllegalArgumentException("Unsupported type: " + value.getClass().getName());
+    }
+    return this;
+  }
+
+  /**
+   * Changes the writer to treat the next value as a string name. This is useful for map adapters so
+   * that arbitrary type adapters can use {@link #value} to write a name value.
+   */
+  final void promoteValueToName() throws IOException {
+    int context = peekScope();
+    if (context != NONEMPTY_OBJECT && context != EMPTY_OBJECT) {
+      throw new IllegalStateException("Nesting problem.");
+    }
+    promoteValueToName = true;
+  }
+
+  /**
+   * Cancels immediately-nested calls to {@link #beginArray()} or {@link #beginObject()} and their
+   * matching calls to {@link #endArray} or {@link #endObject()}. Use this to compose JSON adapters
+   * without nesting.
+   *
+   * <p>For example, the following creates JSON with nested arrays: {@code [1,[2,3,4],5]}.
+   *
+   * <pre>{@code
+   *
+   *   JsonAdapter<List<Integer>> integersAdapter = ...
+   *
+   *   public void writeNumbers(JsonWriter writer) {
+   *     writer.beginArray();
+   *     writer.value(1);
+   *     integersAdapter.toJson(writer, Arrays.asList(2, 3, 4));
+   *     writer.value(5);
+   *     writer.endArray();
+   *   }
+   * }</pre>
+   *
+   * <p>With flattening we can create JSON with a single array {@code [1,2,3,4,5]}:
+   *
+   * <pre>{@code
+   *
+   *   JsonAdapter<List<Integer>> integersAdapter = ...
+   *
+   *   public void writeNumbers(JsonWriter writer) {
+   *     writer.beginArray();
+   *     int token = writer.beginFlatten();
+   *     writer.value(1);
+   *     integersAdapter.toJson(writer, Arrays.asList(2, 3, 4));
+   *     writer.value(5);
+   *     writer.endFlatten(token);
+   *     writer.endArray();
+   *   }
+   * }</pre>
+   *
+   * <p>This method flattens arrays within arrays:
+   *
+   * <pre>{@code
+   *
+   *   Emit:       [1, [2, 3, 4], 5]
+   *   To produce: [1, 2, 3, 4, 5]
+   * }</pre>
+   *
+   * It also flattens objects within objects. Do not call {@link #name} before writing a flattened
+   * object.
+   *
+   * <pre>{@code
+   *
+   *   Emit:       {"a": 1, {"b": 2}, "c": 3}
+   *   To Produce: {"a": 1, "b": 2, "c": 3}
+   * }</pre>
+   *
+   * Other combinations are permitted but do not perform flattening. For example, objects inside of
+   * arrays are not flattened:
+   *
+   * <pre>{@code
+   *
+   *   Emit:       [1, {"b": 2}, 3, [4, 5], 6]
+   *   To Produce: [1, {"b": 2}, 3, 4, 5, 6]
+   * }</pre>
+   *
+   * <p>This method returns an opaque token. Callers must match all calls to this method with a call
+   * to {@link #endFlatten} with the matching token.
+   */
+  @CheckReturnValue public final int beginFlatten() {
+    int context = peekScope();
+    if (context != NONEMPTY_OBJECT && context != EMPTY_OBJECT
+        && context != NONEMPTY_ARRAY && context != EMPTY_ARRAY) {
+      throw new IllegalStateException("Nesting problem.");
+    }
+    int token = flattenStackSize;
+    flattenStackSize = stackSize;
+    return token;
+  }
+
+  /** Ends nested call flattening created by {@link #beginFlatten}. */
+  public final void endFlatten(int token) {
+    flattenStackSize = token;
+  }
 
   /**
    * Returns a <a href="http://goessner.net/articles/JsonPath/">JsonPath</a> to
    * the current location in the JSON value.
    */
-  public abstract String getPath();
+  @CheckReturnValue public final String getPath() {
+    return JsonScope.getPath(stackSize, scopes, pathNames, pathIndices);
+  }
 }

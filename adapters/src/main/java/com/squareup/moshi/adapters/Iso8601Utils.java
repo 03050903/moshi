@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.moshi;
+package com.squareup.moshi.adapters;
 
+import com.squareup.moshi.JsonDataException;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.GregorianCalendar;
@@ -23,7 +24,7 @@ import java.util.TimeZone;
 
 /**
  * Jackson’s date formatter, pruned to Moshi's needs. Forked from this file:
- * https://github.com/FasterXML/jackson-databind/blob/master/src/main/java/com/fasterxml/jackson/databind/util/ISO8601Utils.java
+ * https://github.com/FasterXML/jackson-databind/blob/67ebf7305f492285a8f9f4de31545f5f16fc7c3a/src/main/java/com/fasterxml/jackson/databind/util/ISO8601Utils.java
  *
  * Utilities methods for manipulating dates in iso8601 format. This is much much faster and GC
  * friendly than using SimpleDateFormat so highly suitable if you (un)serialize lots of date
@@ -190,7 +191,7 @@ final class Iso8601Utils {
       // If we get a ParseException it'll already have the right message/offset.
       // Other exception types can convert here.
     } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
-      throw new JsonDataException("Not an RFC 3339 date: " + date);
+      throw new JsonDataException("Not an RFC 3339 date: " + date, e);
     }
   }
 

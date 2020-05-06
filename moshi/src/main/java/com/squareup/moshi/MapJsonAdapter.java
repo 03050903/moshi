@@ -20,6 +20,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * Converts maps with string keys to JSON objects.
@@ -28,7 +29,7 @@ import java.util.Set;
  */
 final class MapJsonAdapter<K, V> extends JsonAdapter<Map<K, V>> {
   public static final Factory FACTORY = new Factory() {
-    @Override public JsonAdapter<?> create(
+    @Override public @Nullable JsonAdapter<?> create(
         Type type, Set<? extends Annotation> annotations, Moshi moshi) {
       if (!annotations.isEmpty()) return null;
       Class<?> rawType = Types.getRawType(type);
@@ -41,7 +42,7 @@ final class MapJsonAdapter<K, V> extends JsonAdapter<Map<K, V>> {
   private final JsonAdapter<K> keyAdapter;
   private final JsonAdapter<V> valueAdapter;
 
-  public MapJsonAdapter(Moshi moshi, Type keyType, Type valueType) {
+  MapJsonAdapter(Moshi moshi, Type keyType, Type valueType) {
     this.keyAdapter = moshi.adapter(keyType);
     this.valueAdapter = moshi.adapter(valueType);
   }
@@ -50,9 +51,9 @@ final class MapJsonAdapter<K, V> extends JsonAdapter<Map<K, V>> {
     writer.beginObject();
     for (Map.Entry<K, V> entry : map.entrySet()) {
       if (entry.getKey() == null) {
-        throw new JsonDataException("Map key is null at path " + writer.getPath());
+        throw new JsonDataException("Map key is null at " + writer.getPath());
       }
-      writer.promoteNameToValue();
+      writer.promoteValueToName();
       keyAdapter.toJson(writer, entry.getKey());
       valueAdapter.toJson(writer, entry.getValue());
     }
@@ -69,7 +70,7 @@ final class MapJsonAdapter<K, V> extends JsonAdapter<Map<K, V>> {
       V replaced = result.put(name, value);
       if (replaced != null) {
         throw new JsonDataException("Map key '" + name + "' has multiple values at path "
-            + reader.getPath());
+            + reader.getPath() + ": " + replaced + " and " + value);
       }
     }
     reader.endObject();

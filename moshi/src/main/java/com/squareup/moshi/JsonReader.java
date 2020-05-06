@@ -17,6 +17,12 @@ package com.squareup.moshi;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.CheckReturnValue;
+import javax.annotation.Nullable;
 import okio.Buffer;
 import okio.BufferedSource;
 import okio.ByteString;
@@ -115,7 +121,7 @@ import okio.ByteString;
  *         id = reader.nextLong();
  *       } else if (name.equals("text")) {
  *         text = reader.nextString();
- *       } else if (name.equals("geo") && reader.peek() != JsonToken.NULL) {
+ *       } else if (name.equals("geo") && reader.peek() != Token.NULL) {
  *         geo = readDoublesArray(reader);
  *       } else if (name.equals("user")) {
  *         user = readUser(reader);
@@ -171,15 +177,70 @@ import okio.ByteString;
  * of this class are not thread safe.
  */
 public abstract class JsonReader implements Closeable {
-  /**
-   * Returns a new instance that reads a JSON-encoded stream from {@code source}.
-   */
-  public static JsonReader of(BufferedSource source) {
-    return new BufferedSourceJsonReader(source);
+  // The nesting stack. Using a manual array rather than an ArrayList saves 20%. This stack will
+  // grow itself up to 256 levels of nesting including the top-level document. Deeper nesting is
+  // prone to trigger StackOverflowErrors.
+  int stackSize;
+  int[] scopes;
+  String[] pathNames;
+  int[] pathIndices;
+
+  /** True to accept non-spec compliant JSON. */
+  boolean lenient;
+
+  /** True to throw a {@link JsonDataException} on any attempt to call {@link #skipValue()}. */
+  boolean failOnUnknown;
+
+  /** Returns a new instance that reads UTF-8 encoded JSON from {@code source}. */
+  @CheckReturnValue public static JsonReader of(BufferedSource source) {
+    return new JsonUtf8Reader(source);
   }
 
+  // Package-private to control subclasses.
   JsonReader() {
-    // Package-private to control subclasses.
+    scopes = new int[32];
+    pathNames = new String[32];
+    pathIndices = new int[32];
+  }
+
+  // Package-private to control subclasses.
+  JsonReader(JsonReader copyFrom) {
+    this.stackSize = copyFrom.stackSize;
+    this.scopes = copyFrom.scopes.clone();
+    this.pathNames = copyFrom.pathNames.clone();
+    this.pathIndices = copyFrom.pathIndices.clone();
+    this.lenient = copyFrom.lenient;
+    this.failOnUnknown = copyFrom.failOnUnknown;
+  }
+
+  final void pushScope(int newTop) {
+    if (stackSize == scopes.length) {
+      if (stackSize == 256) {
+        throw new JsonDataException("Nesting too deep at " + getPath());
+      }
+      scopes = Arrays.copyOf(scopes, scopes.length * 2);
+      pathNames = Arrays.copyOf(pathNames, pathNames.length * 2);
+      pathIndices = Arrays.copyOf(pathIndices, pathIndices.length * 2);
+    }
+    scopes[stackSize++] = newTop;
+  }
+
+  /**
+   * Throws a new IO exception with the given message and a context snippet
+   * with this reader's content.
+   */
+  final JsonEncodingException syntaxError(String message) throws JsonEncodingException {
+    throw new JsonEncodingException(message + " at path " + getPath());
+  }
+
+  final JsonDataException typeMismatch(@Nullable Object value, Object expected) {
+    if (value == null) {
+      return new JsonDataException(
+          "Expected " + expected + " but was null at path " + getPath());
+    } else {
+      return new JsonDataException("Expected " + expected + " but was " + value + ", a "
+          + value.getClass().getName() + ", at path " + getPath());
+    }
   }
 
   /**
@@ -207,12 +268,16 @@ public abstract class JsonReader implements Closeable {
    *   <li>Name/value pairs separated by {@code ;} instead of {@code ,}.
    * </ul>
    */
-  public abstract void setLenient(boolean lenient);
+  public final void setLenient(boolean lenient) {
+    this.lenient = lenient;
+  }
 
   /**
    * Returns true if this parser is liberal in what it accepts.
    */
-  public abstract boolean isLenient();
+  @CheckReturnValue public final boolean isLenient() {
+    return lenient;
+  }
 
   /**
    * Configure whether this parser throws a {@link JsonDataException} when {@link #skipValue} is
@@ -222,12 +287,16 @@ public abstract class JsonReader implements Closeable {
    * useful in development and debugging because it means a typo like "locatiom" will be detected
    * early. It's potentially harmful in production because it complicates revising a JSON schema.
    */
-  public abstract void setFailOnUnknown(boolean failOnUnknown);
+  public final void setFailOnUnknown(boolean failOnUnknown) {
+    this.failOnUnknown = failOnUnknown;
+  }
 
   /**
-   * Returns true if this parser forbids skipping values.
+   * Returns true if this parser forbids skipping names and values.
    */
-  public abstract boolean failOnUnknown();
+  @CheckReturnValue public final boolean failOnUnknown() {
+    return failOnUnknown;
+  }
 
   /**
    * Consumes the next token from the JSON stream and asserts that it is the beginning of a new
@@ -256,25 +325,34 @@ public abstract class JsonReader implements Closeable {
   /**
    * Returns true if the current array or object has another element.
    */
-  public abstract boolean hasNext() throws IOException;
+  @CheckReturnValue public abstract boolean hasNext() throws IOException;
 
   /**
    * Returns the type of the next token without consuming it.
    */
-  public abstract Token peek() throws IOException;
+  @CheckReturnValue public abstract Token peek() throws IOException;
 
   /**
    * Returns the next token, a {@linkplain Token#NAME property name}, and consumes it.
    *
    * @throws JsonDataException if the next token in the stream is not a property name.
    */
-  public abstract String nextName() throws IOException;
+  @CheckReturnValue public abstract String nextName() throws IOException;
 
   /**
    * If the next token is a {@linkplain Token#NAME property name} that's in {@code options}, this
    * consumes it and returns its index. Otherwise this returns -1 and no name is consumed.
    */
-  abstract int selectName(Options options) throws IOException;
+  @CheckReturnValue public abstract int selectName(Options options) throws IOException;
+
+  /**
+   * Skips the next token, consuming it. This method is intended for use when the JSON token stream
+   * contains unrecognized or unhandled names.
+   *
+   * <p>This throws a {@link JsonDataException} if this parser has been configured to {@linkplain
+   * #failOnUnknown fail on unknown} names.
+   */
+  public abstract void skipName() throws IOException;
 
   /**
    * Returns the {@linkplain Token#STRING string} value of the next token, consuming it. If the next
@@ -288,7 +366,7 @@ public abstract class JsonReader implements Closeable {
    * If the next token is a {@linkplain Token#STRING string} that's in {@code options}, this
    * consumes it and returns its index. Otherwise this returns -1 and no string is consumed.
    */
-  abstract int selectString(Options options) throws IOException;
+  @CheckReturnValue public abstract int selectString(Options options) throws IOException;
 
   /**
    * Returns the {@linkplain Token#BOOLEAN boolean} value of the next token, consuming it.
@@ -303,7 +381,7 @@ public abstract class JsonReader implements Closeable {
    *
    * @throws JsonDataException if the next token is not null or if this reader is closed.
    */
-  public abstract <T> T nextNull() throws IOException;
+  public abstract @Nullable <T> T nextNull() throws IOException;
 
   /**
    * Returns the {@linkplain Token#NUMBER double} value of the next token, consuming it. If the next
@@ -346,10 +424,90 @@ public abstract class JsonReader implements Closeable {
   public abstract void skipValue() throws IOException;
 
   /**
+   * Returns the value of the next token, consuming it. The result may be a string, number, boolean,
+   * null, map, or list, according to the JSON structure.
+   *
+   * @throws JsonDataException if the next token is not a literal value, if a JSON object has a
+   * duplicate key.
+   * @see JsonWriter#jsonValue(Object)
+   */
+  public final @Nullable Object readJsonValue() throws IOException {
+    switch (peek()) {
+      case BEGIN_ARRAY:
+        List<Object> list = new ArrayList<>();
+        beginArray();
+        while (hasNext()) {
+          list.add(readJsonValue());
+        }
+        endArray();
+        return list;
+
+      case BEGIN_OBJECT:
+        Map<String, Object> map = new LinkedHashTreeMap<>();
+        beginObject();
+        while (hasNext()) {
+          String name = nextName();
+          Object value = readJsonValue();
+          Object replaced = map.put(name, value);
+          if (replaced != null) {
+            throw new JsonDataException("Map key '" + name + "' has multiple values at path "
+                + getPath() + ": " + replaced + " and " + value);
+          }
+        }
+        endObject();
+        return map;
+
+      case STRING:
+        return nextString();
+
+      case NUMBER:
+        return nextDouble();
+
+      case BOOLEAN:
+        return nextBoolean();
+
+      case NULL:
+        return nextNull();
+
+      default:
+        throw new IllegalStateException(
+            "Expected a value but was " + peek() + " at path " + getPath());
+    }
+  }
+
+  /**
+   * Returns a new {@code JsonReader} that can read data from this {@code JsonReader} without
+   * consuming it. The returned reader becomes invalid once this one is next read or closed.
+   *
+   * <p>For example, we can use {@code peekJson()} to lookahead and read the same data multiple
+   * times.
+   *
+   * <pre> {@code
+   *
+   *   Buffer buffer = new Buffer();
+   *   buffer.writeUtf8("[123, 456, 789]")
+   *
+   *   JsonReader jsonReader = JsonReader.of(buffer);
+   *   jsonReader.beginArray();
+   *   jsonReader.nextInt(); // Returns 123, reader contains 456, 789 and ].
+   *
+   *   JsonReader peek = reader.peekJson();
+   *   peek.nextInt() // Returns 456.
+   *   peek.nextInt() // Returns 789.
+   *   peek.endArray()
+   *
+   *   jsonReader.nextInt() // Returns 456, reader contains 789 and ].
+   * }</pre>
+   */
+  @CheckReturnValue public abstract JsonReader peekJson();
+
+  /**
    * Returns a <a href="http://goessner.net/articles/JsonPath/">JsonPath</a> to
    * the current location in the JSON value.
    */
-  public abstract String getPath();
+  @CheckReturnValue public final String getPath() {
+    return JsonScope.getPath(stackSize, scopes, pathNames, pathIndices);
+  }
 
   /**
    * Changes the reader to treat the next name as a string value. This is useful for map adapters so
@@ -359,13 +517,9 @@ public abstract class JsonReader implements Closeable {
 
   /**
    * A set of strings to be chosen with {@link #selectName} or {@link #selectString}. This prepares
-   * the encoded values of the strings so they can be read directly from the input source. It cannot
-   * read arbitrary encodings of the strings: if any of a string's characters are unnecessarily
-   * escaped in the source JSON, that string will not be selected. Similarly, if the string is
-   * unquoted or uses single quotes in the source JSON, it will not be selected. Client code that
-   * uses this class should fall back to another mechanism to accommodate this possibility.
+   * the encoded values of the strings so they can be read directly from the input source.
    */
-  static final class Options {
+  public static final class Options {
     final String[] strings;
     final okio.Options doubleQuoteSuffix;
 
@@ -374,12 +528,12 @@ public abstract class JsonReader implements Closeable {
       this.doubleQuoteSuffix = doubleQuoteSuffix;
     }
 
-    public static Options of(String... strings) {
+    @CheckReturnValue public static Options of(String... strings) {
       try {
         ByteString[] result = new ByteString[strings.length];
         Buffer buffer = new Buffer();
         for (int i = 0; i < strings.length; i++) {
-          BufferedSinkJsonWriter.string(buffer, strings[i]);
+          JsonUtf8Writer.string(buffer, strings[i]);
           buffer.readByte(); // Skip the leading double quote (but leave the trailing one).
           result[i] = buffer.readByteString();
         }

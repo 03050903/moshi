@@ -15,48 +15,82 @@
  */
 package com.squareup.moshi;
 
+import com.squareup.moshi.internal.Util;
 import java.io.IOException;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.util.LinkedHashMap;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import javax.annotation.Nullable;
+
+import static com.squareup.moshi.internal.Util.resolve;
 
 /**
- * Emits a regular class as a JSON object by mapping Java fields to JSON object properties. Fields
- * of classes in {@code java.*}, {@code javax.*} and {@code android.*} are omitted from both
- * serialization and deserialization unless they are either public or protected.
+ * Emits a regular class as a JSON object by mapping Java fields to JSON object properties.
+ *
+ * <h3>Platform Types</h3>
+ * Fields from platform classes are omitted from both serialization and deserialization unless
+ * they are either public or protected. This includes the following packages and their subpackages:
+ *
+ * <ul>
+ *   <li>android.*
+ *   <li>androidx.*
+ *   <li>java.*
+ *   <li>javax.*
+ *   <li>kotlin.*
+ *   <li>kotlinx.*
+ *   <li>scala.*
+ * </ul>
  */
 final class ClassJsonAdapter<T> extends JsonAdapter<T> {
   public static final JsonAdapter.Factory FACTORY = new JsonAdapter.Factory() {
-    @Override public JsonAdapter<?> create(
+    @Override public @Nullable JsonAdapter<?> create(
         Type type, Set<? extends Annotation> annotations, Moshi moshi) {
+      if (!(type instanceof Class) && !(type instanceof ParameterizedType)) {
+        return null;
+      }
       Class<?> rawType = Types.getRawType(type);
       if (rawType.isInterface() || rawType.isEnum()) return null;
-      if (isPlatformType(rawType)) {
-        throw new IllegalArgumentException("Platform "
-            + type
-            + " annotated "
-            + annotations
-            + " requires explicit JsonAdapter to be registered");
-      }
       if (!annotations.isEmpty()) return null;
+      if (Util.isPlatformType(rawType)) {
+        throwIfIsCollectionClass(type, List.class);
+        throwIfIsCollectionClass(type, Set.class);
+        throwIfIsCollectionClass(type, Map.class);
+        throwIfIsCollectionClass(type, Collection.class);
 
-      if (rawType.getEnclosingClass() != null && !Modifier.isStatic(rawType.getModifiers())) {
-        if (rawType.getSimpleName().isEmpty()) {
-          throw new IllegalArgumentException(
-              "Cannot serialize anonymous class " + rawType.getName());
-        } else {
-          throw new IllegalArgumentException(
-              "Cannot serialize non-static nested class " + rawType.getName());
+        String messagePrefix = "Platform " + rawType;
+        if (type instanceof ParameterizedType) {
+          messagePrefix += " in " + type;
         }
+        throw new IllegalArgumentException(
+            messagePrefix + " requires explicit JsonAdapter to be registered");
+      }
+
+      if (rawType.isAnonymousClass()) {
+        throw new IllegalArgumentException("Cannot serialize anonymous class " + rawType.getName());
+      }
+      if (rawType.isLocalClass()) {
+        throw new IllegalArgumentException("Cannot serialize local class " + rawType.getName());
+      }
+      if (rawType.getEnclosingClass() != null && !Modifier.isStatic(rawType.getModifiers())) {
+        throw new IllegalArgumentException(
+            "Cannot serialize non-static nested class " + rawType.getName());
       }
       if (Modifier.isAbstract(rawType.getModifiers())) {
         throw new IllegalArgumentException("Cannot serialize abstract class " + rawType.getName());
+      }
+      if (Util.isKotlin(rawType)) {
+        throw new IllegalArgumentException("Cannot serialize Kotlin type " + rawType.getName()
+            + ". Reflective serialization of Kotlin classes without using kotlin-reflect has "
+            + "undefined and unexpected behavior. Please use KotlinJsonAdapter from the "
+            + "moshi-kotlin artifact or use code gen from the moshi-kotlin-codegen artifact.");
       }
 
       ClassFactory<Object> classFactory = ClassFactory.get(rawType);
@@ -67,25 +101,41 @@ final class ClassJsonAdapter<T> extends JsonAdapter<T> {
       return new ClassJsonAdapter<>(classFactory, fields).nullSafe();
     }
 
+    /**
+     * Throw clear error messages for the common beginner mistake of using the concrete
+     * collection classes instead of the collection interfaces, eg: ArrayList instead of List.
+     */
+    private void throwIfIsCollectionClass(Type type, Class<?> collectionInterface) {
+      Class<?> rawClass = Types.getRawType(type);
+      if (collectionInterface.isAssignableFrom(rawClass)) {
+        throw new IllegalArgumentException(
+            "No JsonAdapter for " + type + ", you should probably use "
+                + collectionInterface.getSimpleName() + " instead of " + rawClass.getSimpleName()
+                + " (Moshi only supports the collection interfaces by default)"
+                + " or else register a custom JsonAdapter.");
+      }
+    }
+
     /** Creates a field binding for each of declared field of {@code type}. */
     private void createFieldBindings(
         Moshi moshi, Type type, Map<String, FieldBinding<?>> fieldBindings) {
       Class<?> rawType = Types.getRawType(type);
-      boolean platformType = isPlatformType(rawType);
+      boolean platformType = Util.isPlatformType(rawType);
       for (Field field : rawType.getDeclaredFields()) {
         if (!includeField(platformType, field.getModifiers())) continue;
 
         // Look up a type adapter for this type.
-        Type fieldType = Types.resolve(type, rawType, field.getGenericType());
+        Type fieldType = resolve(type, rawType, field.getGenericType());
         Set<? extends Annotation> annotations = Util.jsonAnnotations(field);
-        JsonAdapter<Object> adapter = moshi.adapter(fieldType, annotations);
+        String fieldName = field.getName();
+        JsonAdapter<Object> adapter = moshi.adapter(fieldType, annotations, fieldName);
 
         // Create the binding between field and JSON.
         field.setAccessible(true);
 
         // Store it using the field's name. If there was already a field with this name, fail!
         Json jsonAnnotation = field.getAnnotation(Json.class);
-        String name = jsonAnnotation != null ? jsonAnnotation.name() : field.getName();
+        String name = jsonAnnotation != null ? jsonAnnotation.name() : fieldName;
         FieldBinding<Object> fieldBinding = new FieldBinding<>(name, field, adapter);
         FieldBinding<?> replaced = fieldBindings.put(name, fieldBinding);
         if (replaced != null) {
@@ -96,31 +146,19 @@ final class ClassJsonAdapter<T> extends JsonAdapter<T> {
       }
     }
 
-    /**
-     * Returns true if {@code rawType} is built in. We don't reflect on private fields of platform
-     * types because they're unspecified and likely to be different on Java vs. Android.
-     */
-    private boolean isPlatformType(Class<?> rawType) {
-      return rawType.getName().startsWith("java.")
-          || rawType.getName().startsWith("javax.")
-          || rawType.getName().startsWith("android.");
-    }
-
     /** Returns true if fields with {@code modifiers} are included in the emitted JSON. */
     private boolean includeField(boolean platformType, int modifiers) {
       if (Modifier.isStatic(modifiers) || Modifier.isTransient(modifiers)) return false;
-      return Modifier.isPublic(modifiers) || Modifier.isProtected(modifiers)|| !platformType;
+      return Modifier.isPublic(modifiers) || Modifier.isProtected(modifiers) || !platformType;
     }
   };
 
   private final ClassFactory<T> classFactory;
-  private final Map<String, FieldBinding<?>> fieldsMap;
   private final FieldBinding<?>[] fieldsArray;
   private final JsonReader.Options options;
 
   ClassJsonAdapter(ClassFactory<T> classFactory, Map<String, FieldBinding<?>> fieldsMap) {
     this.classFactory = classFactory;
-    this.fieldsMap = new LinkedHashMap<>(fieldsMap);
     this.fieldsArray = fieldsMap.values().toArray(new FieldBinding[fieldsMap.size()]);
     this.options = JsonReader.Options.of(
         fieldsMap.keySet().toArray(new String[fieldsMap.size()]));
@@ -133,10 +171,7 @@ final class ClassJsonAdapter<T> extends JsonAdapter<T> {
     } catch (InstantiationException e) {
       throw new RuntimeException(e);
     } catch (InvocationTargetException e) {
-      Throwable targetException = e.getTargetException();
-      if (targetException instanceof RuntimeException) throw (RuntimeException) targetException;
-      if (targetException instanceof Error) throw (Error) targetException;
-      throw new RuntimeException(targetException);
+      throw Util.rethrowCause(e);
     } catch (IllegalAccessException e) {
       throw new AssertionError();
     }
@@ -145,18 +180,12 @@ final class ClassJsonAdapter<T> extends JsonAdapter<T> {
       reader.beginObject();
       while (reader.hasNext()) {
         int index = reader.selectName(options);
-        FieldBinding<?> fieldBinding;
-        if (index != -1) {
-          fieldBinding = fieldsArray[index];
-        } else {
-          String name = reader.nextName();
-          fieldBinding = fieldsMap.get(name);
-          if (fieldBinding == null) {
-            reader.skipValue();
-            continue;
-          }
+        if (index == -1) {
+          reader.skipName();
+          reader.skipValue();
+          continue;
         }
-        fieldBinding.read(reader, result);
+        fieldsArray[index].read(reader, result);
       }
       reader.endObject();
       return result;
@@ -187,7 +216,7 @@ final class ClassJsonAdapter<T> extends JsonAdapter<T> {
     final Field field;
     final JsonAdapter<T> adapter;
 
-    public FieldBinding(String name, Field field, JsonAdapter<T> adapter) {
+    FieldBinding(String name, Field field, JsonAdapter<T> adapter) {
       this.name = name;
       this.field = field;
       this.adapter = adapter;

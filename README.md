@@ -120,7 +120,7 @@ Moshi moshi = new Moshi.Builder()
     .build();
 ```
 
-Voila:
+Voilà:
 
 ```json
 {
@@ -211,6 +211,64 @@ We can now use Moshi to parse the JSON directly to an `Event`.
 ```java
 JsonAdapter<Event> jsonAdapter = moshi.adapter(Event.class);
 Event event = jsonAdapter.fromJson(json);
+```
+
+### Adapter convenience methods
+
+Moshi provides a number of convenience methods for `JsonAdapter` objects:
+- `nullSafe()`
+- `nonNull()`
+- `lenient()`
+- `failOnUnknown()`
+- `indent()`
+- `serializeNulls()`
+
+These factory methods wrap an existing `JsonAdapter` into additional functionality.
+For example, if you have an adapter that doesn't support nullable values, you can use `nullSafe()` to make it null safe:
+
+```java
+String dateJson = "\"2018-11-26T11:04:19.342668Z\"";
+String nullDateJson = "null";
+
+// Hypothetical IsoDateDapter, doesn't support null by default
+JsonAdapter<Date> adapter = new IsoDateDapter();
+
+Date date = adapter.fromJson(dateJson);
+System.out.println(date); // Mon Nov 26 12:04:19 CET 2018
+
+Date nullDate = adapter.fromJson(nullDateJson);
+// Exception, com.squareup.moshi.JsonDataException: Expected a string but was NULL at path $
+
+Date nullDate = adapter.nullSafe().fromJson(nullDateJson);
+System.out.println(nullDate); // null
+```
+
+In contrast to `nullSafe()` there is `nonNull()` to make an adapter refuse null values. Refer to the Moshi JavaDoc for details on the various methods.
+
+### Parse JSON Arrays
+
+Say we have a JSON string of this structure:
+
+```json
+[
+  {
+    "rank": "4",
+    "suit": "CLUBS"
+  },
+  {
+    "rank": "A",
+    "suit": "HEARTS"
+  }
+]
+```
+
+We can now use Moshi to parse the JSON string into a `List<Card>`.
+
+```java
+String cardsJsonResponse = ...;
+Type type = Types.newParameterizedType(List.class, Card.class);
+JsonAdapter<List<Card>> adapter = moshi.adapter(type);
+List<Card> cards = adapter.fromJson(cardsJsonResponse);
 ```
 
 ### Fails Gracefully
@@ -390,7 +448,7 @@ JSON contains a value for the field. Instead it will get a default value.
 
 ### Default Values & Constructors
 
-When reading JSON that is missing a field, Moshi relies on the the Java or Android runtime to assign
+When reading JSON that is missing a field, Moshi relies on the Java or Android runtime to assign
 the field’s value. Which value it uses depends on whether the class has a no-arguments constructor.
 
 If the class has a no-arguments constructor, Moshi will call that constructor and whatever value
@@ -446,25 +504,120 @@ public final class BlackjackHand {
 }
 ```
 
+Kotlin
+------
+
+Moshi is a great JSON library for Kotlin. It understands Kotlin’s non-nullable types and default
+parameter values. When you use Kotlin with Moshi you may use reflection, codegen, or both.
+
+#### Reflection
+
+The reflection adapter uses Kotlin’s reflection library to convert your Kotlin classes to and from
+JSON. Enable it by adding the `KotlinJsonAdapterFactory` to your `Moshi.Builder`:
+
+```kotlin
+val moshi = Moshi.Builder()
+    // ... add your own JsonAdapters and factories ...
+    .add(KotlinJsonAdapterFactory())
+    .build()
+```
+
+Moshi’s adapters are ordered by precedence, so you always want to add the Kotlin adapter after your
+own custom adapters. Otherwise the `KotlinJsonAdapterFactory` will take precedence and your custom
+adapters will not be called.
+
+The reflection adapter requires the following additional dependency:
+
+```xml
+<dependency>
+  <groupId>com.squareup.moshi</groupId>
+  <artifactId>moshi-kotlin</artifactId>
+  <version>1.9.2</version>
+</dependency>
+```
+
+```kotlin
+implementation("com.squareup.moshi:moshi-kotlin:1.9.2")
+```
+
+Note that the reflection adapter transitively depends on the `kotlin-reflect` library which is a
+2.5 MiB .jar file.
+
+#### Codegen
+
+Moshi’s Kotlin codegen support is an annotation processor. It generates a small and fast adapter for
+each of your Kotlin classes at compile time. Enable it by annotating each class that you want to
+encode as JSON:
+
+```kotlin
+@JsonClass(generateAdapter = true)
+data class BlackjackHand(
+        val hidden_card: Card,
+        val visible_cards: List<Card>
+)
+```
+
+The codegen adapter requires that your Kotlin types and their properties be either `internal` or
+`public` (this is Kotlin’s default visibility).
+
+Kotlin codegen has no additional runtime dependency. You’ll need to [enable kapt][kapt] and then
+add the following to your build to enable the annotation processor:
+
+```xml
+<dependency>
+  <groupId>com.squareup.moshi</groupId>
+  <artifactId>moshi-kotlin-codegen</artifactId>
+  <version>1.9.2</version>
+  <scope>provided</scope>
+</dependency>
+```
+
+```kotlin
+kapt("com.squareup.moshi:moshi-kotlin-codegen:1.9.2")
+```
+
+You must also have the `kotlin-stdlib` dependency on the classpath during compilation in order for
+the compiled code to have the required metadata annotations that Moshi's processor looks for.
+
+#### Limitations
+
+If your Kotlin class has a superclass, it must also be a Kotlin class. Neither reflection or codegen
+support Kotlin types with Java supertypes or Java types with Kotlin supertypes. If you need to
+convert such classes to JSON you must create a custom type adapter.
+
+The JSON encoding of Kotlin types is the same whether using reflection or codegen. Prefer codegen
+for better performance and to avoid the `kotlin-reflect` dependency; prefer reflection to convert
+both private and protected properties. If you have configured both, generated adapters will be used
+on types that are annotated `@JsonClass(generateAdapter = true)`.
 
 Download
 --------
 
 Download [the latest JAR][dl] or depend via Maven:
+
 ```xml
 <dependency>
   <groupId>com.squareup.moshi</groupId>
   <artifactId>moshi</artifactId>
-  <version>1.2.0</version>
+  <version>1.9.2</version>
 </dependency>
 ```
 or Gradle:
-```groovy
-compile 'com.squareup.moshi:moshi:1.2.0'
+```kotlin
+implementation("com.squareup.moshi:moshi:1.9.2")
 ```
 
 Snapshots of the development version are available in [Sonatype's `snapshots` repository][snap].
 
+
+R8 / ProGuard
+--------
+
+If you are using R8 or ProGuard add the options from [this file](https://github.com/square/moshi/blob/master/moshi/src/main/resources/META-INF/proguard/moshi.pro). If using Android, this requires Android Gradle Plugin 3.2.0+.
+
+The `moshi-kotlin` artifact additionally requires the options from [this file](https://github.com/square/moshi/blob/master/kotlin/reflect/src/main/resources/META-INF/proguard/moshi-kotlin.pro)
+
+You might also need rules for Okio which is a dependency of this library.
 
 License
 --------
@@ -484,9 +637,10 @@ License
     limitations under the License.
 
 
- [dl]: https://search.maven.org/remote_content?g=com.squareup.moshi&a=moshi&v=LATEST
+ [dl]: https://search.maven.org/classic/remote_content?g=com.squareup.moshi&a=moshi&v=LATEST
  [snap]: https://oss.sonatype.org/content/repositories/snapshots/com/squareup/moshi/
  [okio]: https://github.com/square/okio/
  [okhttp]: https://github.com/square/okhttp/
  [gson]: https://github.com/google/gson/
- [javadoc]: http://square.github.io/moshi/1.x/moshi/
+ [javadoc]: https://square.github.io/moshi/1.x/moshi/
+ [kapt]: https://kotlinlang.org/docs/reference/kapt.html

@@ -25,7 +25,7 @@ import okio.Buffer;
 import org.junit.Test;
 
 import static com.squareup.moshi.TestUtil.newReader;
-import static com.squareup.moshi.Util.NO_ANNOTATIONS;
+import static com.squareup.moshi.internal.Util.NO_ANNOTATIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
 
@@ -341,8 +341,23 @@ public final class ClassJsonAdapterTest {
     }
   }
 
+  @Test public void localClassNotSupported() throws Exception {
+    class Local {
+    }
+    try {
+      ClassJsonAdapter.FACTORY.create(Local.class, NO_ANNOTATIONS, moshi);
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertThat(expected).hasMessage("Cannot serialize local class "
+          + "com.squareup.moshi.ClassJsonAdapterTest$1Local");
+    }
+  }
+
+  interface Interface {
+  }
+
   @Test public void interfaceNotSupported() throws Exception {
-    assertThat(ClassJsonAdapter.FACTORY.create(Runnable.class, NO_ANNOTATIONS, moshi)).isNull();
+    assertThat(ClassJsonAdapter.FACTORY.create(Interface.class, NO_ANNOTATIONS, moshi)).isNull();
   }
 
   static abstract class Abstract {
@@ -427,6 +442,23 @@ public final class ClassJsonAdapterTest {
     assertThat(fromJson.phoneNumbers).isEqualTo(Arrays.asList("8005553333", "8005554444"));
     assertThat(fromJson.emailAddress).isEqualTo("cash@square.com");
     assertThat(fromJson.zipCode).isEqualTo("94043");
+  }
+
+  static final class Box<T> {
+    final T data;
+
+    Box(T data) {
+      this.data = data;
+    }
+  }
+
+  @Test public void parameterizedType() throws Exception {
+    @SuppressWarnings("unchecked")
+    JsonAdapter<Box<Integer>> adapter = (JsonAdapter<Box<Integer>>) ClassJsonAdapter.FACTORY.create(
+        Types.newParameterizedTypeWithOwner(ClassJsonAdapterTest.class, Box.class, Integer.class),
+        NO_ANNOTATIONS, moshi);
+    assertThat(adapter.fromJson("{\"data\":5}").data).isEqualTo(5);
+    assertThat(adapter.toJson(new Box<>(5))).isEqualTo("{\"data\":5}");
   }
 
   private <T> String toJson(Class<T> type, T value) throws IOException {

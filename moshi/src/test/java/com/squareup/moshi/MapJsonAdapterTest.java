@@ -17,17 +17,16 @@ package com.squareup.moshi;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import okio.Buffer;
-import org.assertj.core.data.MapEntry;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import static com.squareup.moshi.TestUtil.newReader;
-import static com.squareup.moshi.Util.NO_ANNOTATIONS;
+import static com.squareup.moshi.internal.Util.NO_ANNOTATIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
 
@@ -46,7 +45,9 @@ public final class MapJsonAdapterTest {
     Map<String, Boolean> fromJson = fromJson(
         String.class, Boolean.class, "{\"a\":true,\"b\":false,\"c\":null}");
     assertThat(fromJson).containsExactly(
-        MapEntry.entry("a", true), MapEntry.entry("b", false), MapEntry.entry("c", null));
+        new SimpleEntry<String, Boolean>("a", true),
+        new SimpleEntry<String, Boolean>("b", false),
+        new SimpleEntry<String, Boolean>("c", null));
   }
 
   @Test public void mapWithNullKeyFailsToEmit() throws Exception {
@@ -57,7 +58,7 @@ public final class MapJsonAdapterTest {
       toJson(String.class, Boolean.class, map);
       fail();
     } catch (JsonDataException expected) {
-      assertThat(expected).hasMessage("Map key is null at path $.");
+      assertThat(expected).hasMessage("Map key is null at $.");
     }
   }
 
@@ -85,6 +86,27 @@ public final class MapJsonAdapterTest {
     assertThat(jsonAdapter.fromJson(jsonReader)).isEqualTo(null);
   }
 
+  @Test public void covariantValue() throws Exception {
+    // Important for Kotlin maps, which are all Map<K, ? extends T>.
+    JsonAdapter<Map<String, Object>> jsonAdapter =
+        mapAdapter(String.class, Types.subtypeOf(Object.class));
+
+    Map<String, Object> map = new LinkedHashMap<>();
+    map.put("boolean", true);
+    map.put("float", 42.0);
+    map.put("String", "value");
+
+    String asJson = "{\"boolean\":true,\"float\":42.0,\"String\":\"value\"}";
+
+    Buffer buffer = new Buffer();
+    JsonWriter jsonWriter = JsonWriter.of(buffer);
+    jsonAdapter.toJson(jsonWriter, map);
+    assertThat(buffer.readUtf8()).isEqualTo(asJson);
+
+    JsonReader jsonReader = newReader(asJson);
+    assertThat(jsonAdapter.fromJson(jsonReader)).isEqualTo(map);
+  }
+
   @Test public void orderIsRetained() throws Exception {
     Map<String, Integer> map = new LinkedHashMap<>();
     map.put("c", 1);
@@ -106,7 +128,7 @@ public final class MapJsonAdapterTest {
       fromJson(String.class, Integer.class, "{\"c\":1,\"c\":2}");
       fail();
     } catch (JsonDataException expected) {
-      assertThat(expected).hasMessage("Map key 'c' has multiple values at path $.c");
+      assertThat(expected).hasMessage("Map key 'c' has multiple values at path $.c: 1 and 2");
     }
   }
 
@@ -120,10 +142,87 @@ public final class MapJsonAdapterTest {
     String toJson = toJson(Integer.class, Boolean.class, map);
     assertThat(toJson).isEqualTo("{\"5\":true,\"6\":false,\"7\":null}");
 
-    Map<String, Boolean> fromJson = fromJson(
+    Map<Integer, Boolean> fromJson = fromJson(
         Integer.class, Boolean.class, "{\"5\":true,\"6\":false,\"7\":null}");
     assertThat(fromJson).containsExactly(
-        MapEntry.entry(5, true), MapEntry.entry(6, false), MapEntry.entry(7, null));
+        new SimpleEntry<Integer, Boolean>(5, true),
+        new SimpleEntry<Integer, Boolean>(6, false),
+        new SimpleEntry<Integer, Boolean>(7, null));
+  }
+
+  @Test public void mapWithNonStringKeysToJsonObject() {
+    Map<Integer, Boolean> map = new LinkedHashMap<>();
+    map.put(5, true);
+    map.put(6, false);
+    map.put(7, null);
+
+    Map<String, Boolean> jsonObject = new LinkedHashMap<>();
+    jsonObject.put("5", true);
+    jsonObject.put("6", false);
+    jsonObject.put("7", null);
+
+    JsonAdapter<Map<Integer, Boolean>> jsonAdapter = mapAdapter(Integer.class, Boolean.class);
+    assertThat(jsonAdapter.serializeNulls().toJsonValue(map)).isEqualTo(jsonObject);
+    assertThat(jsonAdapter.fromJsonValue(jsonObject)).isEqualTo(map);
+  }
+
+  @Test public void booleanKeyTypeHasCoherentErrorMessage() {
+    Map<Boolean, String> map = new LinkedHashMap<>();
+    map.put(true, "");
+    JsonAdapter<Map<Boolean, String>> adapter = mapAdapter(Boolean.class, String.class);
+    try {
+      adapter.toJson(map);
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage("Boolean cannot be used as a map key in JSON at path $.");
+    }
+    try {
+      adapter.toJsonValue(map);
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage("Boolean cannot be used as a map key in JSON at path $.");
+    }
+  }
+
+  static final class Key {
+  }
+
+  @Test public void objectKeyTypeHasCoherentErrorMessage() {
+    Map<Key, String> map = new LinkedHashMap<>();
+    map.put(new Key(), "");
+    JsonAdapter<Map<Key, String>> adapter = mapAdapter(Key.class, String.class);
+    try {
+      adapter.toJson(map);
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage("Object cannot be used as a map key in JSON at path $.");
+    }
+    try {
+      adapter.toJsonValue(map);
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage("Object cannot be "
+          + "used as a map key in JSON at path $.");
+    }
+  }
+
+  @Test public void arrayKeyTypeHasCoherentErrorMessage() {
+    Map<String[], String> map = new LinkedHashMap<>();
+    map.put(new String[0], "");
+    JsonAdapter<Map<String[], String>> adapter =
+        mapAdapter(Types.arrayOf(String.class), String.class);
+    try {
+      adapter.toJson(map);
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage("Array cannot be used as a map key in JSON at path $.");
+    }
+    try {
+      adapter.toJsonValue(map);
+      fail();
+    } catch (IllegalStateException expected) {
+      assertThat(expected).hasMessage("Array cannot be used as a map key in JSON at path $.");
+    }
   }
 
   private <K, V> String toJson(Type keyType, Type valueType, Map<K, V> value) throws IOException {

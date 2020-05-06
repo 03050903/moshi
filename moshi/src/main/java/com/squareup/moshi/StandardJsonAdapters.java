@@ -15,17 +15,23 @@
  */
 package com.squareup.moshi;
 
+import com.squareup.moshi.internal.Util;
 import java.io.IOException;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
+
+import static com.squareup.moshi.internal.Util.generatedAdapter;
 
 final class StandardJsonAdapters {
+  private StandardJsonAdapters() {
+  }
+
   public static final JsonAdapter.Factory FACTORY = new JsonAdapter.Factory() {
     @Override public JsonAdapter<?> create(
         Type type, Set<? extends Annotation> annotations, Moshi moshi) {
@@ -50,6 +56,12 @@ final class StandardJsonAdapters {
       if (type == Object.class) return new ObjectJsonAdapter(moshi).nullSafe();
 
       Class<?> rawType = Types.getRawType(type);
+
+      @Nullable JsonAdapter<?> generatedAdapter = generatedAdapter(moshi, type, rawType);
+      if (generatedAdapter != null) {
+        return generatedAdapter;
+      }
+
       if (rawType.isEnum()) {
         //noinspection unchecked
         return new EnumJsonAdapter<>((Class<? extends Enum>) rawType).nullSafe();
@@ -214,22 +226,19 @@ final class StandardJsonAdapters {
 
   static final class EnumJsonAdapter<T extends Enum<T>> extends JsonAdapter<T> {
     private final Class<T> enumType;
-    private final Map<String, T> nameConstantMap;
     private final String[] nameStrings;
     private final T[] constants;
     private final JsonReader.Options options;
 
-    public EnumJsonAdapter(Class<T> enumType) {
+    EnumJsonAdapter(Class<T> enumType) {
       this.enumType = enumType;
       try {
         constants = enumType.getEnumConstants();
-        nameConstantMap = new LinkedHashMap<>();
         nameStrings = new String[constants.length];
         for (int i = 0; i < constants.length; i++) {
           T constant = constants[i];
           Json annotation = enumType.getField(constant.name()).getAnnotation(Json.class);
           String name = annotation != null ? annotation.name() : constant.name();
-          nameConstantMap.put(name, constant);
           nameStrings[i] = name;
         }
         options = JsonReader.Options.of(nameStrings);
@@ -242,12 +251,11 @@ final class StandardJsonAdapters {
       int index = reader.selectString(options);
       if (index != -1) return constants[index];
 
+      // We can consume the string safely, we are terminating anyway.
+      String path = reader.getPath();
       String name = reader.nextString();
-      T constant = nameConstantMap.get(name);
-      if (constant != null) return constant;
       throw new JsonDataException("Expected one of "
-          + nameConstantMap.keySet() + " but was " + name + " at path "
-          + reader.getPath());
+          + Arrays.asList(nameStrings) + " but was " + name + " at path " + path);
     }
 
     @Override public void toJson(JsonWriter writer, T value) throws IOException {
@@ -269,46 +277,44 @@ final class StandardJsonAdapters {
    */
   static final class ObjectJsonAdapter extends JsonAdapter<Object> {
     private final Moshi moshi;
+    private final JsonAdapter<List> listJsonAdapter;
+    private final JsonAdapter<Map> mapAdapter;
+    private final JsonAdapter<String> stringAdapter;
+    private final JsonAdapter<Double> doubleAdapter;
+    private final JsonAdapter<Boolean> booleanAdapter;
 
-    public ObjectJsonAdapter(Moshi moshi) {
+    ObjectJsonAdapter(Moshi moshi) {
       this.moshi = moshi;
+      this.listJsonAdapter = moshi.adapter(List.class);
+      this.mapAdapter = moshi.adapter(Map.class);
+      this.stringAdapter = moshi.adapter(String.class);
+      this.doubleAdapter = moshi.adapter(Double.class);
+      this.booleanAdapter = moshi.adapter(Boolean.class);
     }
 
     @Override public Object fromJson(JsonReader reader) throws IOException {
       switch (reader.peek()) {
         case BEGIN_ARRAY:
-          List<Object> list = new ArrayList<>();
-          reader.beginArray();
-          while (reader.hasNext()) {
-            list.add(fromJson(reader));
-          }
-          reader.endArray();
-          return list;
+          return listJsonAdapter.fromJson(reader);
 
         case BEGIN_OBJECT:
-          Map<String, Object> map = new LinkedHashTreeMap<>();
-          reader.beginObject();
-          while (reader.hasNext()) {
-            map.put(reader.nextName(), fromJson(reader));
-          }
-          reader.endObject();
-          return map;
+          return mapAdapter.fromJson(reader);
 
         case STRING:
-          return reader.nextString();
+          return stringAdapter.fromJson(reader);
 
         case NUMBER:
-          return reader.nextDouble();
+          return doubleAdapter.fromJson(reader);
 
         case BOOLEAN:
-          return reader.nextBoolean();
+          return booleanAdapter.fromJson(reader);
 
         case NULL:
           return reader.nextNull();
 
         default:
-          throw new IllegalStateException("Expected a value but was " + reader.peek()
-              + " at path " + reader.getPath());
+          throw new IllegalStateException(
+              "Expected a value but was " + reader.peek() + " at path " + reader.getPath());
       }
     }
 

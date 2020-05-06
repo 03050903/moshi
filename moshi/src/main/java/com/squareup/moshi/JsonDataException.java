@@ -15,6 +15,8 @@
  */
 package com.squareup.moshi;
 
+import javax.annotation.Nullable;
+
 /**
  * Thrown when the data in a JSON document doesn't match the data expected by the caller. For
  * example, suppose the application expects a boolean but the JSON document contains a string. When
@@ -22,20 +24,24 @@ package com.squareup.moshi;
  *
  * <p>Exceptions of this type should be fixed by either changing the application code to accept
  * the unexpected JSON, or by changing the JSON to conform to the application's expectations.
+ *
+ * <p>This exception may also be triggered if a document's nesting exceeds 31 levels. This depth is
+ * sufficient for all practical applications, but shallow enough to avoid uglier failures like
+ * {@link StackOverflowError}.
  */
 public final class JsonDataException extends RuntimeException {
   public JsonDataException() {
   }
 
-  public JsonDataException(String message) {
+  public JsonDataException(@Nullable String message) {
     super(message);
   }
 
-  public JsonDataException(Throwable cause) {
+  public JsonDataException(@Nullable Throwable cause) {
     super(cause);
   }
 
-  public JsonDataException(String message, Throwable cause) {
+  public JsonDataException(@Nullable String message, @Nullable Throwable cause) {
     super(message, cause);
   }
 }

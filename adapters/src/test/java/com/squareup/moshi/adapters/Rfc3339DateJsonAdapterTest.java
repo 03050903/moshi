@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.moshi;
+package com.squareup.moshi.adapters;
 
+import com.squareup.moshi.JsonAdapter;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.GregorianCalendar;
@@ -60,6 +61,11 @@ public final class Rfc3339DateJsonAdapterTest {
         .isEqualTo("\"1990-12-31T23:59:59.000Z\"");
     assertThat(adapter.toJson(newDate(1937, 1, 1, 12, 0, 27, 870, 20)))
         .isEqualTo("\"1937-01-01T11:40:27.870Z\"");
+  }
+
+  @Test public void nullSafety() throws Exception {
+    assertThat(adapter.toJson(null)).isEqualTo("null");
+    assertThat(adapter.fromJson("null")).isNull();
   }
 
   private Date newDate(
